@@ -1,0 +1,398 @@
+---
+title: "Final Project – Pt3"
+author: "Brandon Yan, Nichalas Perrone, Iustin Toader, Satchel Manchester"
+date: "11/15/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+```{r}
+library(DescTools)
+library(car)
+library(ggplot2)
+library(cowplot)
+```
+
+```{r}
+rm(list=ls())
+```
+
+```{r}
+airbnb <- read.csv("final_airbnb.csv")
+```
+
+```{r}
+str(airbnb)
+```
+
+We will now separate the columns we will use for predictions, as well as the numerical variables which will require normalization.
+```{r}
+num_vals <- c('price',"minimum_nights", "number_of_reviews", "reviews_per_month", 'calculated_host_listings_count', 'availability_365')
+preds_airbnb <- airbnb[,c('neighbourhood', 'latitude', 'longitude', 'room_type', 'price', 'minimum_nights', 'number_of_reviews', 'reviews_per_month', 'calculated_host_listings_count', 'availability_365', 'city')]
+```
+
+We will first view the distribution of our numerical predictors.
+```{r}
+plots <- lapply(num_vals,
+                function(col){
+                  p <- 
+                    ggplot(preds_airbnb,
+                      aes_string(col))+
+                    geom_density()
+                })
+
+plot_grid(plotlist = plots)
+```
+
+As we can see, all 6 of our variables gave a right-tailed distribution. 
+We will use the Box-Cox transformation in order to make our numeric variables normally distributed. 1 has to be added to each value since we have 0s in the dataset and the powerTransform function requires strictly positive values.
+```{r}
+for (col in num_vals) {
+  c <- coef(powerTransform(preds_airbnb[,col]+1))
+  if (col == 'price') {
+    price_c = c
+  }
+  col_x <- paste("bc",col, sep = "")
+  preds_airbnb[,col_x]=bcPower(preds_airbnb[,col]+1,c)
+}
+```
+
+
+
+The transformed values are carried over to the original columns, and the new ones are dropped.
+```{r}
+preds_airbnb[,num_vals] <- preds_airbnb[,paste("bc", num_vals, sep="")]
+preds_airbnb <- preds_airbnb[,-c(12:17)]
+```
+
+Let's have another look at the updated distribution of the numerical predictors.
+```{r}
+plots <- lapply(num_vals,
+                function(col){
+                  p <- 
+                    ggplot(preds_airbnb,
+                      aes_string(col))+
+                    geom_density()
+                })
+
+plot_grid(plotlist = plots)
+```
+As we can see, all six are now closer to being normally distributed.
+
+We will now run the linear regression model to predict the price of the listing based on every available variable.
+```{r}
+lm1 <- lm(price ~ . -price, data=preds_airbnb)
+```
+
+```{r}
+summary(lm1)
+```
+As we can see, our model only explains 44% of the variance in the dataset,
+
+
+We will try to improve the accuracy of our model through a few methods such as interaction terms and multicollinearity analysis. Let's first run the vif function on our first model.
+
+```{r}
+vif(lm1)
+```
+
+Unfortunately, this generates an error. It would appear that there are perfectly colinear variables in our model. The neighborhood column creates too many dummy variables to check individually, but a good assumption would be that the neighborhood and city dummies could be to blame for the error. We will remove city from the linear model.
+
+```{r}
+lm2 <- lm(price ~ . -city, data = preds_airbnb)
+```
+```{r}
+summary(lm2)
+```
+```{r}
+vif(lm2)
+```
+
+We can see that although our second model has a very small decrease in the Adj R^2, the vif command no longer returns the error. Given the comparable accuracy performance and lack of perfectly colinear terms, we will stick with the second model for now. Next, we can see that the GVIF adjusted for degrees of freedom is quite large for the latitude and longitude, so we will create a third model excluding them and evaluate again.
+
+```{r}
+lm3 <- lm(price ~ . -city -longitude -latitude, data=preds_airbnb)
+```
+```{r}
+summary(lm3)
+```
+```{r}
+vif(lm3)
+```
+
+Now we have small adjusted GVIF values for all our  variables, but the performance of the model is not improving. Our final attempt is to include interaction terms between all numeric variables.
+
+```{r}
+lm4 <- lm(price ~ neighbourhood + room_type + (minimum_nights + number_of_reviews + calculated_host_listings_count + availability_365)^2, data=preds_airbnb)
+```
+```{r}
+summary(lm4)
+```
+```{r}
+vif(lm4)
+```
+
+Again, we were unable to increase the performance of the original model. Although the highest Adj. R^2 was registered in our first model, the difference between it and the second linear model is not that large, and lm2 does not suffer from the perfect collinearity issue. As such, we will base our presentation around it.
+
+We will now show the predicted vs actual price values for lm2 side-by-side in a constructed dataframe.
+
+```{r}
+price_preds <- predict(lm2, preds_airbnb)
+price_preds <- data.frame(price_preds)
+price_preds <- (price_preds*price_c+1)^(1/price_c)-1
+price_preds
+```
+
+```{r}
+price_preds[,'act_price'] <- airbnb[,'price']
+price_preds
+```
+
+```{r}
+names(price_preds)[1] <- 'pred_price'
+price_preds
+```
+
+```{r}
+price_preds
+```
+
+
+## MSE
+
+```{r}
+mean((price_preds$act_price - price_preds$pred_price)^2)
+```
+
+
+```{r}
+sample_preds <- price_preds[1:500,]
+sample_preds <- sample_preds[order(sample_preds$act_price),]
+rownames(sample_preds) <- 1:nrow(sample_preds)
+sample_preds
+```
+
+
+```{r}
+ggplot(sample_preds, aes(x = as.numeric(row.names(sample_preds)))) +
+  geom_line(aes(y=pred_price), color="darkred") +
+  geom_line(aes(y=act_price), color="steelblue")
+```
+
+## LASSO, RIDGE, Elastic-net models
+
+```{r}
+library(Rcpp)
+library(fastDummies)
+library(glmnet)
+```
+
+```{r}
+set.seed(22)
+```
+
+# Creating dummy matrix
+```{r}
+dms <- dummy_cols(preds_airbnb, select_columns = c('neighbourhood', 'city', 'room_type'), remove_selected_columns = TRUE)
+class(dms)
+```
+
+
+## We will first split the data into training and testing set using a 80/20 distribution.
+
+```{r}
+train_rows <- sample(1:nrow(dms), .8*nrow(dms))
+x_train <- dms[train_rows,]
+x_test <- dms[-train_rows,]
+```
+
+```{r}
+x_train_copy <- x_train
+```
+
+```{r}
+y_train <- x_train$price
+y_test <- x_test$price
+```
+
+```{r}
+x_train <- x_train[-3]
+x_test <- x_test[-3]
+```
+
+```{r}
+x_train <- as.matrix(x_train)
+x_test <- as.matrix(x_test)
+```
+
+```{r}
+y_train_p <- (y_train*price_c+1)^(1/price_c)-1
+y_train_p
+```
+
+```{r}
+y_test_p <- (y_test*price_c+1)^(1/price_c)-1
+y_test_p
+```
+
+## Linear Regression on testing dataset
+
+```{r}
+lm_x_test <- preds_airbnb[-train_rows,]
+lm_pred <- predict(lm1, lm_x_test)
+lm_comp <- data.frame(y_test)
+lm_comp[, 'lm_pred'] <- lm_pred
+lm_comp
+```
+
+```{r}
+lm_comp$y_test <- (lm_comp$y_test*price_c+1)^(1/price_c)-1
+lm_comp$lm_pred <- (lm_comp$lm_pred*price_c+1)^(1/price_c)-1
+```
+
+```{r}
+lm_comp
+```
+
+```{r}
+mean((lm_comp$y_test - lm_comp$lm_pred)^2)
+```
+
+## Ridge Regression
+
+```{r}
+ridge_m.fit <- cv.glmnet(x_train, y_train, type.measure="mse", alpha=0, family="gaussian")
+```
+
+```{r}
+ridge_m.predicted <- predict(ridge_m.fit, s=ridge_m.fit$lambda.min, newx = x_test)
+```
+
+```{r}
+ridge_comp <- data.frame(y_test)
+ridge_comp[,'ridge_pred'] <- ridge_m.predicted 
+```
+
+```{r}
+ridge_comp$y_test <- (ridge_comp$y_test*price_c+1)^(1/price_c)-1
+```
+```{r}
+ridge_comp$ridge_pred <- (ridge_comp$ridge_pred*price_c+1)^(1/price_c)-1
+```
+
+
+```{r}
+mean((ridge_comp$y_test - ridge_comp$ridge_pred)^2)
+```
+
+```{r}
+sample_ridge_comp <- ridge_comp[1:500,]
+sample_ridge_comp <- sample_ridge_comp[order(sample_ridge_comp$y_test),]
+rownames(sample_ridge_comp) <- 1:nrow(sample_ridge_comp)
+sample_ridge_comp
+```
+
+```{r}
+ggplot(sample_ridge_comp, aes(x = as.numeric(row.names(sample_ridge_comp)))) +
+  geom_line(aes(y=ridge_pred), color="darkred") +
+  geom_line(aes(y=y_test), color="steelblue")
+```
+
+## Lasso Regression
+
+```{r}
+lasso_m.fit <- cv.glmnet(x_train, y_train, type.measure="mse", alpha=1, family="gaussian")
+```
+
+```{r}
+lasso_m.predicted <- predict(lasso_m.fit, s=lasso_m.fit$lambda.min, newx = x_test)
+```
+
+```{r}
+lasso_comp <- data.frame(y_test)
+lasso_comp[,'lasso_pred'] <- lasso_m.predicted 
+```
+
+```{r}
+lasso_comp$y_test <- (lasso_comp$y_test*price_c+1)^(1/price_c)-1
+```
+```{r}
+lasso_comp$lasso_pred <- (lasso_comp$lasso_pred*price_c+1)^(1/price_c)-1
+```
+
+```{r}
+mean((lasso_comp$y_test - lasso_comp$lasso_pred)^2)
+```
+
+```{r}
+sample_lasso_comp <- lasso_comp[1:500,]
+sample_lasso_comp <- sample_lasso_comp[order(sample_lasso_comp$y_test),]
+rownames(sample_lasso_comp) <- 1:nrow(sample_lasso_comp)
+sample_lasso_comp
+```
+
+```{r}
+ggplot(sample_lasso_comp, aes(x = as.numeric(row.names(sample_lasso_comp)))) +
+  geom_line(aes(y=lasso_pred), color="darkred") +
+  geom_line(aes(y=y_test), color="steelblue")
+```
+
+## Elastic-net Regression
+
+```{r}
+elastic_m.fit <- cv.glmnet(x_train, y_train, type.measure="mse", alpha=0.5, family="gaussian")
+```
+
+```{r}
+elastic_m.predicted <- predict(elastic_m.fit, s=elastic_m.fit$lambda.min, newx = x_test)
+```
+
+```{r}
+elastic_comp <- data.frame(y_test)
+elastic_comp[,'elastic_pred'] <- elastic_m.predicted 
+```
+
+```{r}
+elastic_comp$y_test <- (elastic_comp$y_test*price_c+1)^(1/price_c)-1
+```
+```{r}
+elastic_comp$elastic_pred <- (elastic_comp$elastic_pred*price_c+1)^(1/price_c)-1
+```
+
+```{r}
+mean((elastic_comp$y_test - elastic_comp$elastic_pred)^2)
+```
+
+```{r}
+sample_elastic_comp <- elastic_comp[1:500,]
+sample_elastic_comp <- sample_elastic_comp[order(sample_elastic_comp$y_test),]
+rownames(sample_elastic_comp) <- 1:nrow(sample_elastic_comp)
+sample_elastic_comp
+```
+
+```{r}
+ggplot(sample_elastic_comp, aes(x = as.numeric(row.names(sample_elastic_comp)))) +
+  geom_line(aes(y=elastic_pred), color="darkred") +
+  geom_line(aes(y=y_test), color="steelblue")
+```
+
+```{r}
+save.image("Research_Airbnb.RData")
+```
+
+
+## LASSO/RIDGE/Elastic-net discussion
+
+As we can see from the MSE of each regression model, none of them does a particularly remarkable job of predicting the actual price. In fact, the model with the smalles MSE is the original linear-regression model. (For the purposes of this comparison, I used lm1 because I included all variables in the glm regressions and needed to keep the dimensions constant) From the glm regressions, LASSO performs the best, with Elastic-net a very close second, and Ridge third.
+
+##Discussion
+
+1.	The model that we ran was a multi-linear regression model.
+2.	The intent of this model was to predict the price of an Airbnb location given a variety of different variables associated with the house and listing. These variables included neighborhood, room type, availability, and many others. The goal was to be able to help new Airbnb hosts or current hosts be able to effectively price themselves accordingly to what their listing has to offer.
+3.	Our model only was able to obtain an adjusted r^2 value of .44 or ~ 44%. This means that all the variables in the data set contribute to 44% of the variance in the dataset, which means there are other confounding variables that affect the figure that an Airbnb listing can be priced at. In fact, the other variables contribute to > 50% of the variance in price, so it tells us the dataset doesn’t have these variables. 
+This, however, is to be expected. As the most important variable in quality of stay and subsequently price is the content of the review. This is a qualitative variable that is extremely hard to directly quantify other than stars (like a 5-star review or a 4 star review). What is actually said in those reviews is a huge determinant of demand for a location and in theory, price (assuming micro-economic theory of increased demand  increase in price). There are also other categorical factors that we do not have insight on like other amenities offered, the quality of area, and many others that all have an effect on price.
+4.	This is, however, a good start to help owners of Airbnb hosts to get a base understanding of the different factors that go into pricing a listing on the platform, and hopefully with greater access to data we can create a more robust model that will enable new and current Airbnb hosts to competitively price their listings. 
+
